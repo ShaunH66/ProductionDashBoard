@@ -31,6 +31,10 @@ h1, h2, h3, h4, h5, label, span, div,
 .css-1uccc91-singleValue, .css-qrbaxs-DropdownOption {
     color: #000000 !important;
 }
+/* Force the label text for the SELECTBOX to black (Pick a Project) */
+div[data-testid="stSelectbox"] > label {
+    color: #000000 !important;
+}
 </style>
 """
 
@@ -38,10 +42,10 @@ st.set_page_config(page_title="Engineering Project Dashboard", layout="wide")
 st.markdown(DARK_CSS, unsafe_allow_html=True)
 
 # -----------------------------------------
-# Excel File Path & Data Loading
+# File Uploader for Excel Data
 # -----------------------------------------
-EXCEL_PATH = r"Q:\MSE - Projects\Project Status\Production.xlsx"
-LOGO_PATH = r"Q:\MSE - Projects\Project Status\Marchant Schmidt Logo.jpg"
+st.sidebar.header("Upload Data")
+uploaded_file = st.sidebar.file_uploader("Upload Production.xlsx", type=["xlsx", "xls"])
 
 def parse_duration(val):
     """Attempts to convert a duration value to float by extracting digits."""
@@ -54,10 +58,18 @@ def parse_duration(val):
         return None
 
 @st.cache_data
-def load_data(path: str) -> pd.DataFrame:
-    df = pd.read_excel(path)
+def load_data(file) -> pd.DataFrame:
+    """
+    1) Reads Excel from the uploaded file.
+    2) Normalizes 'Name' for 'FAT'/'Shipping'.
+    3) Extends zero-day FAT/Shipping tasks to 3 days.
+    4) Tags each row with 'Project' (each Manually Scheduled row starts a new project).
+    5) Adds 'Label' = 'Name (Project)' for Gantt chart text.
+    6) Parses the 'Duration' column to numeric.
+    """
+    df = pd.read_excel(file)
 
-    # Normalize Name
+    # 1) Normalize 'Name'
     if "Name" in df.columns:
         df["Name"] = df["Name"].astype(str).str.strip().fillna("")
         df["Name"] = df["Name"].replace({
@@ -65,7 +77,7 @@ def load_data(path: str) -> pd.DataFrame:
             r"(?i)^\s*shipping\s*$": "Shipping"
         }, regex=True)
 
-    # Convert Start/Finish to datetime
+    # 2) Convert Start/Finish to datetime
     if "Start" in df.columns:
         df["Start"] = pd.to_datetime(df["Start"], errors="coerce")
     if "Finish" in df.columns:
@@ -73,14 +85,14 @@ def load_data(path: str) -> pd.DataFrame:
 
     df = df.reset_index(drop=True)
 
-    # Extend zero-day FAT/Shipping to 3 days
+    # 3) Extend zero-day FAT/Shipping to 3 days
     if {"Name", "Start", "Finish"}.issubset(df.columns):
         mask_fs = df["Name"].isin(["FAT", "Shipping"]) & df["Start"].notna() & df["Finish"].notna()
         durations = (df["Finish"] - df["Start"]).dt.days
         zero_mask = mask_fs & (durations == 0)
         df.loc[zero_mask, "Finish"] = df.loc[zero_mask, "Finish"] + pd.Timedelta(days=3)
 
-    # Tag each row with the current "Project"
+    # 4) Tag each row with the current "Project"
     df["Project"] = None
     current_project = None
     if "Task Mode" in df.columns and "Name" in df.columns:
@@ -89,25 +101,28 @@ def load_data(path: str) -> pd.DataFrame:
                 current_project = df.loc[i, "Name"]
             df.loc[i, "Project"] = current_project
 
-    # Label = "Name (Project)"
+    # 5) Label = "Name (Project)"
     def make_label(row):
         if pd.notnull(row["Project"]):
             return f"{row['Name']} ({row['Project']})"
         return row["Name"]
     df["Label"] = df.apply(make_label, axis=1)
 
-    # Parse "Duration" column to numeric
+    # 6) Parse "Duration" column to numeric
     if "Duration" in df.columns:
         df["Duration"] = df["Duration"].apply(parse_duration)
 
     return df
 
-if not os.path.exists(EXCEL_PATH):
-    st.error(f"Could not find Excel file at: {EXCEL_PATH}")
+if uploaded_file is None:
+    st.info("Please upload the Production.xlsx file from your system using the sidebar uploader.")
     st.stop()
+else:
+    df = load_data(uploaded_file)
 
-df = load_data(EXCEL_PATH)
-
+# -----------------------------------------
+# Sidebar Navigation
+# -----------------------------------------
 page = st.sidebar.radio("Navigation", ["Overall Dashboard", "Project Details"])
 
 def task_color(name: str) -> str:
@@ -129,6 +144,12 @@ def task_color(name: str) -> str:
     else:
         return "lightgray"
 
+def build_color_map(data: pd.DataFrame) -> dict:
+    cmap = {}
+    for nm in data["Name"].unique():
+        cmap[nm] = task_color(nm)
+    return cmap
+
 def find_overlaps_subtasks(gantt_df: pd.DataFrame) -> pd.DataFrame:
     """
     Overlap only if same sub-task name in different projects (auto-scheduled).
@@ -141,7 +162,6 @@ def find_overlaps_subtasks(gantt_df: pd.DataFrame) -> pd.DataFrame:
     overlaps = []
     for i in range(len(data)):
         for j in range(i+1, len(data)):
-            # same sub-task name, different project
             if data.loc[i, "Name"] != data.loc[j, "Name"]:
                 continue
             if data.loc[i, "Project"] == data.loc[j, "Project"]:
@@ -160,22 +180,10 @@ def find_overlaps_subtasks(gantt_df: pd.DataFrame) -> pd.DataFrame:
                 })
     return pd.DataFrame(overlaps)
 
-def build_color_map(data: pd.DataFrame) -> dict:
-    cmap = {}
-    for nm in data["Name"].unique():
-        cmap[nm] = task_color(nm)
-    return cmap
-
 # -----------------------------------------
 # PAGE 1: OVERALL DASHBOARD
 # -----------------------------------------
 if page == "Overall Dashboard":
-    # Attempt to display company logo
-    if os.path.exists(LOGO_PATH):
-        st.image(LOGO_PATH, width=350)
-    else:
-        st.warning(f"Logo not found: {LOGO_PATH}")
-
     st.title("Engineering Project Dashboard")
 
     st.subheader("Summary Metrics")
@@ -188,7 +196,7 @@ if page == "Overall Dashboard":
     with c1:
         st.metric("Total Projects", total_projects)
 
-    # 2) Total Project Duration from manually scheduled
+    # 2) Total Project Duration (from manually scheduled rows)
     if "Duration" in df.columns:
         ms_df = df[df["Task Mode"] == "Manually Scheduled"].copy()
         ms_df["Duration"] = pd.to_numeric(ms_df["Duration"], errors="coerce")
@@ -255,15 +263,13 @@ if page == "Overall Dashboard":
 
     st.markdown("---")
     st.subheader("Overall Gantt Chart")
-
     if {"Name", "Start", "Finish", "Label"}.issubset(df.columns):
         gantt_df = df.dropna(subset=["Start", "Finish"]).copy()
         gantt_df["sort_order"] = 1
         if "Task Mode" in gantt_df.columns:
             gantt_df.loc[gantt_df["Task Mode"] == "Manually Scheduled", "sort_order"] = 0
         gantt_df = gantt_df.sort_values(by=["sort_order", "Name"], ascending=[True, True])
-
-        color_map = build_color_map(gantt_df)
+        color_map = {nm: task_color(nm) for nm in gantt_df["Name"].unique()}
         gantt_fig = px.timeline(
             gantt_df,
             x_start="Start",
@@ -292,10 +298,10 @@ if page == "Overall Dashboard":
         gantt_fig.update_yaxes(color="white")
         st.plotly_chart(gantt_fig, use_container_width=True)
 
-        st.subheader("Overlapping Engineering Tasks Across Projects")
+        st.subheader("Overlapping Engineering Tasks Across Different Projects")
         overlap_df = find_overlaps_subtasks(gantt_df)
         if overlap_df.empty:
-            st.info("No Overlapping Engineering Tasks Across Projects")
+            st.info("No Overlapping Engineering Tasks Across Different Projects")
         else:
             st.dataframe(overlap_df)
     else:
@@ -314,10 +320,9 @@ else:
         if manual_df.empty:
             st.info("No manually scheduled projects found.")
         else:
-            # Using a radio button instead of selectbox
-            st.markdown("Pick a Project:")
+            st.markdown("**Pick a Project:**")
+            # Using radio buttons for project selection for better visibility
             project_choice = st.radio("", manual_df["Name"].unique())
-
             proj_indices = df.index[(df["Name"] == project_choice) & (df["Task Mode"] == "Manually Scheduled")].tolist()
             if not proj_indices:
                 st.warning("Project not found.")
@@ -328,17 +333,16 @@ else:
                 sub_tasks = df.iloc[sel_idx+1 : next_idx]
                 sub_tasks = sub_tasks[sub_tasks["Task Mode"] == "Auto Scheduled"].copy()
 
-                st.subheader(f"Engineering Tasks for {project_choice}")
+                st.subheader(f"Auto Scheduled Tasks for {project_choice}")
                 if sub_tasks.empty:
-                    st.info("No Engineering Tasks tasks.")
+                    st.info("No auto scheduled sub-tasks.")
                 else:
                     st.dataframe(sub_tasks)
                     if {"Name", "Start", "Finish", "Label"}.issubset(sub_tasks.columns):
                         sub_tasks["sort_order"] = 1
                         sub_tasks.loc[sub_tasks["Task Mode"] == "Manually Scheduled", "sort_order"] = 0
                         sub_tasks = sub_tasks.sort_values(by=["sort_order", "Name"], ascending=[True, True])
-
-                        sub_color_map = build_color_map(sub_tasks)
+                        sub_color_map = {nm: task_color(nm) for nm in sub_tasks["Name"].unique()}
                         sub_fig = px.timeline(
                             sub_tasks,
                             x_start="Start",
