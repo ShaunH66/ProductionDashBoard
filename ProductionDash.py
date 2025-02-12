@@ -283,7 +283,7 @@ if page == "Overall Dashboard":
     else:
         st.info("Need 'Task Mode', 'Duration', 'Project' columns for Overall Project Duration chart.")
     st.markdown("---")
-    # Overall Project Completion Chart as Donut Charts (live update)
+    # Project Completion (%) Donut Charts
     st.subheader("Project Completion (%)")
     st_autorefresh(interval=1000, key="completion_refresh")
     if {"Task Mode", "Start", "Finish", "Project"}.issubset(df.columns):
@@ -298,15 +298,19 @@ if page == "Overall Dashboard":
             for idx, row in ms_df.iterrows():
                 comp = row["Completion"]
                 remaining = 100 - comp
+                # Create a small donut chart using plotly
                 comp_df = pd.DataFrame({
                     "Status": ["Completed", "Remaining"],
                     "Value": [comp, remaining]
                 })
-                fig = px.pie(comp_df, names="Status", values="Value",
-                             title=f"{row['Project']}",
-                             hole=0.5, template="plotly_dark")
+                fig = px.pie(comp_df, names="Status", values="Value", 
+                            title=f"{row['Project']}",
+                            hole=0.5, template="plotly_dark")
+                # Remove default text
                 fig.update_traces(textinfo='none', marker=dict(line=dict(color='#121212', width=1)))
+                # Add annotation in center with the % complete
                 fig.update_layout(
+                    annotations=[dict(text=f"{comp:.0f}%", x=0.5, y=0.5, font_size=20, showarrow=False, font=dict(color="white"))],
                     showlegend=False,
                     margin=dict(l=10, r=10, t=30, b=10),
                     font_color="white",
@@ -315,7 +319,7 @@ if page == "Overall Dashboard":
                 )
                 cols[idx % 4].plotly_chart(fig, use_container_width=True)
         else:
-            st.info("No scheduled projects with valid dates for Completion.")
+            st.info("No manually scheduled projects with valid dates for Completion.")
     else:
         st.info("Need 'Task Mode', 'Start', 'Finish', 'Project' columns for Completion chart.")
     st.markdown("---")
