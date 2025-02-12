@@ -285,7 +285,7 @@ if page == "Overall Dashboard":
     st.markdown("---")
     # Project Completion (%) Donut Charts
     st.subheader("Project Completion (%)")
-    st_autorefresh(interval=1000, key="completion_refresh")
+    st_autorefresh(interval=120000, key="completion_refresh")
     if {"Task Mode", "Start", "Finish", "Project"}.issubset(df.columns):
         ms_df = df[df["Task Mode"] == "Manually Scheduled"].copy()
         ms_df = ms_df.dropna(subset=["Start", "Finish"])
