@@ -3,6 +3,8 @@ import re
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+from datetime import datetime
+from streamlit_autorefresh import st_autorefresh
 
 # -----------------------------------------
 # Dark Theme CSS (no forced black label for selectbox)
@@ -31,13 +33,12 @@ h1, h2, h3, h4, h5, label, span, div,
 .css-1uccc91-singleValue, .css-qrbaxs-DropdownOption {
     color: #000000 !important;
 }
-/* Force the label text for the SELECTBOX to black (Pick a Project) */
-div[data-testid="stSelectbox"] > label {
+/* For radio button labels, force dark text */
+div[data-testid="stRadio"] > label {
     color: #000000 !important;
 }
 </style>
 """
-
 st.set_page_config(page_title="Engineering Project Dashboard", layout="wide")
 st.markdown(DARK_CSS, unsafe_allow_html=True)
 
@@ -101,11 +102,12 @@ def load_data(file) -> pd.DataFrame:
                 current_project = df.loc[i, "Name"]
             df.loc[i, "Project"] = current_project
 
-    # 5) Label = "Name (Project)"
+    # 5) Label = "Name (Project)" -- ensure non-empty label
     def make_label(row):
-        if pd.notnull(row["Project"]):
-            return f"{row['Name']} ({row['Project']})"
-        return row["Name"]
+        name_val = row["Name"] if row["Name"] != "" else "Unnamed"
+        if pd.notnull(row["Project"]) and row["Project"] != "":
+            return f"{name_val} ({row['Project']})"
+        return name_val
     df["Label"] = df.apply(make_label, axis=1)
 
     # 6) Parse "Duration" column to numeric
@@ -115,7 +117,7 @@ def load_data(file) -> pd.DataFrame:
     return df
 
 if uploaded_file is None:
-    st.info("Please upload the Production.xlsx file from your system using the sidebar uploader.")
+    st.info("Please upload the Production.xlsx file using the sidebar uploader.")
     st.stop()
 else:
     df = load_data(uploaded_file)
@@ -125,6 +127,9 @@ else:
 # -----------------------------------------
 page = st.sidebar.radio("Navigation", ["Overall Dashboard", "Project Details"])
 
+# -----------------------------------------
+# Task -> Color Functions
+# -----------------------------------------
 def task_color(name: str) -> str:
     nm = name.strip().lower()
     if nm == "fat":
@@ -150,6 +155,22 @@ def build_color_map(data: pd.DataFrame) -> dict:
         cmap[nm] = task_color(nm)
     return cmap
 
+# -----------------------------------------
+# Compute Completion Percentage for a Project
+# -----------------------------------------
+def compute_completion(start, finish):
+    """Compute completion % based on current date relative to start and finish."""
+    today = pd.Timestamp.now().normalize()
+    if pd.isna(start) or pd.isna(finish) or start >= finish:
+        return None
+    total = (finish - start).days
+    elapsed = (today - start).days
+    pct = (elapsed / total) * 100
+    return max(0, min(100, pct))
+
+# -----------------------------------------
+# Overlapping Auto-Scheduled Sub-Tasks (Different Projects)
+# -----------------------------------------
 def find_overlaps_subtasks(gantt_df: pd.DataFrame) -> pd.DataFrame:
     """
     Overlap only if same sub-task name in different projects (auto-scheduled).
@@ -184,18 +205,17 @@ def find_overlaps_subtasks(gantt_df: pd.DataFrame) -> pd.DataFrame:
 # PAGE 1: OVERALL DASHBOARD
 # -----------------------------------------
 if page == "Overall Dashboard":
+
     st.title("Engineering Project Dashboard")
 
     st.subheader("Summary Metrics")
     c1, c2, c3, c4, c5 = st.columns(5)
-
     # 1) Total Projects (manually scheduled)
     total_projects = 0
     if "Task Mode" in df.columns:
         total_projects = (df["Task Mode"] == "Manually Scheduled").sum()
     with c1:
         st.metric("Total Projects", total_projects)
-
     # 2) Total Project Duration (from manually scheduled rows)
     if "Duration" in df.columns:
         ms_df = df[df["Task Mode"] == "Manually Scheduled"].copy()
@@ -204,28 +224,30 @@ if page == "Overall Dashboard":
         total_proj_duration = ms_df["Duration"].sum()
         with c2:
             st.metric("Total Project Duration (days)", f"{total_proj_duration:.0f}")
-
-    # 3) Average Duration (all rows)
-    if "Duration" in df.columns and pd.api.types.is_numeric_dtype(df["Duration"]):
-        avg_duration = df["Duration"].mean()
-        with c3:
-            st.metric("Avg. Duration (days)", f"{avg_duration:.2f}")
-
+    # 3) Average Duration (from manually scheduled rows)
+    if "Duration" in df.columns:
+        ms_df = df[df["Task Mode"] == "Manually Scheduled"].copy()
+        ms_df["Duration"] = pd.to_numeric(ms_df["Duration"], errors="coerce")
+        ms_df = ms_df.dropna(subset=["Duration"])
+        if not ms_df.empty:
+            avg_duration = ms_df["Duration"].mean()
+            with c3:
+                st.metric("Avg. Duration (days)", f"{avg_duration:.2f}")
+        else:
+            with c3:
+                st.metric("Avg. Duration (days)", "N/A")
     # 4) Earliest Start
     if "Start" in df.columns and df["Start"].notna().any():
         earliest_start = df["Start"].min()
         with c4:
             st.metric("Earliest Start", earliest_start.strftime("%Y-%m-%d"))
-
     # 5) Latest Finish
     if "Finish" in df.columns and df["Finish"].notna().any():
         latest_finish = df["Finish"].max()
         with c5:
             st.metric("Latest Finish", latest_finish.strftime("%Y-%m-%d"))
-
     st.markdown("---")
-
-    # Overall Project Duration Chart
+    # Overall Project Duration Chart (Manually Entered)
     st.subheader("Overall Project Duration")
     if {"Task Mode", "Duration", "Project"}.issubset(df.columns):
         ms_df = df[df["Task Mode"] == "Manually Scheduled"].copy()
@@ -260,8 +282,44 @@ if page == "Overall Dashboard":
             st.plotly_chart(dur_fig, use_container_width=True)
     else:
         st.info("Need 'Task Mode', 'Duration', 'Project' columns for Overall Project Duration chart.")
-
     st.markdown("---")
+    # Overall Project Completion Chart as Donut Charts (live update)
+    st.subheader("Project Completion (%)")
+    st_autorefresh(interval=1000, key="completion_refresh")
+    if {"Task Mode", "Start", "Finish", "Project"}.issubset(df.columns):
+        ms_df = df[df["Task Mode"] == "Manually Scheduled"].copy()
+        ms_df = ms_df.dropna(subset=["Start", "Finish"])
+        if not ms_df.empty:
+            today = pd.Timestamp.now().normalize()
+            ms_df["Completion"] = ((today - ms_df["Start"]).dt.days / (ms_df["Finish"] - ms_df["Start"]).dt.days) * 100
+            ms_df["Completion"] = ms_df["Completion"].clip(lower=0, upper=100)
+            num_projects = len(ms_df)
+            cols = st.columns(min(num_projects, 4))
+            for idx, row in ms_df.iterrows():
+                comp = row["Completion"]
+                remaining = 100 - comp
+                comp_df = pd.DataFrame({
+                    "Status": ["Completed", "Remaining"],
+                    "Value": [comp, remaining]
+                })
+                fig = px.pie(comp_df, names="Status", values="Value",
+                             title=f"{row['Project']}",
+                             hole=0.5, template="plotly_dark")
+                fig.update_traces(textinfo='none', marker=dict(line=dict(color='#121212', width=1)))
+                fig.update_layout(
+                    showlegend=False,
+                    margin=dict(l=10, r=10, t=30, b=10),
+                    font_color="white",
+                    paper_bgcolor="#121212",
+                    plot_bgcolor="#121212"
+                )
+                cols[idx % 4].plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No scheduled projects with valid dates for Completion.")
+    else:
+        st.info("Need 'Task Mode', 'Start', 'Finish', 'Project' columns for Completion chart.")
+    st.markdown("---")
+    # Overall Gantt Chart
     st.subheader("Overall Gantt Chart")
     if {"Name", "Start", "Finish", "Label"}.issubset(df.columns):
         gantt_df = df.dropna(subset=["Start", "Finish"]).copy()
@@ -297,28 +355,25 @@ if page == "Overall Dashboard":
         gantt_fig.update_xaxes(color="white")
         gantt_fig.update_yaxes(color="white")
         st.plotly_chart(gantt_fig, use_container_width=True)
-
-        st.subheader("Overlapping Engineering Tasks Across Different Projects")
+        st.subheader("Overlapping Sub-Tasks (Across Different Projects)")
         overlap_df = find_overlaps_subtasks(gantt_df)
         if overlap_df.empty:
-            st.info("No Overlapping Engineering Tasks Across Different Projects")
+            st.info("No overlapping sub-tasks with the same name across different projects.")
         else:
             st.dataframe(overlap_df)
     else:
         st.info("Need 'Name', 'Start', 'Finish', 'Label' columns for Gantt chart.")
-
 # -----------------------------------------
 # PAGE 2: PROJECT DETAILS
 # -----------------------------------------
 else:
     st.title("Individual Project Details")
-
     if "Task Mode" not in df.columns:
         st.warning("No 'Task Mode' column found.")
     else:
         manual_df = df[df["Task Mode"] == "Manually Scheduled"].copy()
         if manual_df.empty:
-            st.info("No manually scheduled projects found.")
+            st.info("No scheduled projects found.")
         else:
             st.markdown("**Pick a Project:**")
             # Using radio buttons for project selection for better visibility
@@ -328,12 +383,53 @@ else:
                 st.warning("Project not found.")
             else:
                 sel_idx = proj_indices[0]
+                # Live countdown for current sub-task
+                now = pd.Timestamp.now()
+                next_idx_list = df.index[(df["Task Mode"] == "Manually Scheduled") & (df.index > sel_idx)].tolist()
+                next_idx = next_idx_list[0] if next_idx_list else len(df)
+                sub_tasks_all = df.iloc[sel_idx+1 : next_idx]
+                sub_tasks_current = sub_tasks_all[
+                    (sub_tasks_all["Task Mode"] == "Auto Scheduled") &
+                    (sub_tasks_all["Start"].notna()) &
+                    (sub_tasks_all["Finish"].notna()) &
+                    (sub_tasks_all["Start"] <= now) &
+                    (sub_tasks_all["Finish"] > now)
+                ]
+                st_autorefresh(interval=1000, key="subtask_countdown")
+                if not sub_tasks_current.empty:
+                    current_sub = sub_tasks_current.iloc[0]
+                    time_remaining = current_sub["Finish"] - now
+                    days = time_remaining.days
+                    hours, remainder = divmod(time_remaining.seconds, 3600)
+                    minutes, seconds = divmod(remainder, 60)
+                    # Larger countdown text
+                    st.markdown(f"<h2 style='color:#e0e0e0;'>Current Task '{current_sub['Name']}' ends in: {days}d {hours:02d}h:{minutes:02d}m:{seconds:02d}s</h2>", unsafe_allow_html=True)
+                else:
+                    st.markdown("<h2 style='color:#e0e0e0;'>No active task. Countdown for next sub-task:</h2>", unsafe_allow_html=True)
+                    sub_tasks_future = sub_tasks_all[
+                        (sub_tasks_all["Task Mode"] == "Auto Scheduled") &
+                        (sub_tasks_all["Start"].notna())
+                    ]
+                    if not sub_tasks_future.empty:
+                        next_sub = sub_tasks_future.iloc[0]
+                        time_until_start = next_sub["Start"] - now
+                        if time_until_start.total_seconds() < 0:
+                            countdown_text = "Sub-task already started."
+                        else:
+                            days = time_until_start.days
+                            hours, remainder = divmod(time_until_start.seconds, 3600)
+                            minutes, seconds = divmod(remainder, 60)
+                            countdown_text = f"Next Sub-Task '{next_sub['Name']}' starts in: {days}d {hours:02d}h:{minutes:02d}m:{seconds:02d}s"
+                        st.markdown(f"<h2 style='color:#e0e0e0;'>{countdown_text}</h2>", unsafe_allow_html=True)
+                # End of live countdown
+
+                st.subheader(f"Auto Scheduled Tasks for {project_choice}")
+                proj_indices = df.index[(df["Name"] == project_choice) & (df["Task Mode"] == "Manually Scheduled")].tolist()
+                sel_idx = proj_indices[0]
                 next_idx_list = df.index[(df["Task Mode"] == "Manually Scheduled") & (df.index > sel_idx)].tolist()
                 next_idx = next_idx_list[0] if next_idx_list else len(df)
                 sub_tasks = df.iloc[sel_idx+1 : next_idx]
                 sub_tasks = sub_tasks[sub_tasks["Task Mode"] == "Auto Scheduled"].copy()
-
-                st.subheader(f"Auto Scheduled Tasks for {project_choice}")
                 if sub_tasks.empty:
                     st.info("No auto scheduled sub-tasks.")
                 else:
